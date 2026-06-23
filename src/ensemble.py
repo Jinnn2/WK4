@@ -25,7 +25,7 @@ def search_best_weights(
     if n_models == 1:
         return [1.0], mse(y_valid, valid_predictions[0])
     if n_models > 4:
-        raise ValueError("grid weight search is intended for up to 4 models")
+        return greedy_blend_weights(valid_predictions, y_valid)
 
     grid = np.round(np.arange(0, 1 + step, step), 10)
     best_score = float("inf")
@@ -46,3 +46,34 @@ def search_best_weights(
         raise RuntimeError("failed to find ensemble weights")
     return best_weights, best_score
 
+
+def greedy_blend_weights(
+    valid_predictions: list[np.ndarray],
+    y_valid: np.ndarray,
+    rounds: int = 200,
+) -> tuple[list[float], float]:
+    n_models = len(valid_predictions)
+    counts = np.zeros(n_models, dtype=float)
+    current_pred = np.zeros_like(valid_predictions[0], dtype=float)
+    best_score = float("inf")
+
+    for round_idx in range(rounds):
+        divisor = round_idx + 1
+        round_best_score = float("inf")
+        round_best_index = 0
+        round_best_pred = current_pred
+
+        for model_idx, pred in enumerate(valid_predictions):
+            candidate = (current_pred * round_idx + pred) / divisor
+            score = mse(y_valid, candidate)
+            if score < round_best_score:
+                round_best_score = score
+                round_best_index = model_idx
+                round_best_pred = candidate
+
+        counts[round_best_index] += 1
+        current_pred = round_best_pred
+        best_score = round_best_score
+
+    weights = (counts / counts.sum()).tolist()
+    return weights, best_score

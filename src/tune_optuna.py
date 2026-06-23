@@ -12,23 +12,51 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.config import OUTPUT_DIR, TARGET_COL, VALID_FRACTION
-from src.data_utils import load_data, select_feature_columns, time_order_split
-from src.features import align_train_test
-from src.models import get_best_iteration, mse, require_package
+from src.data_utils import load_data, select_feature_columns, split_train_valid
+from src.features import LastYearFeatureEncoder, add_target_profile_features, align_train_test
+from src.models import (
+    base_model_name,
+    get_best_iteration,
+    inverse_transform_predictions,
+    mse,
+    require_package,
+    transform_target,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune tree models with Optuna.")
-    parser.add_argument("--model", choices=["lightgbm", "xgboost", "catboost"], default="xgboost")
+    parser.add_argument(
+        "--model",
+        choices=["lightgbm", "xgboost", "catboost", "lightgbm_log", "xgboost_log", "catboost_log"],
+        default="xgboost",
+    )
     parser.add_argument("--trials", type=int, default=40)
     parser.add_argument("--valid-fraction", type=float, default=VALID_FRACTION)
+    parser.add_argument(
+        "--split-strategy",
+        choices=["random", "time"],
+        default="random",
+        help="Validation split strategy used by the tuning objective.",
+    )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR / "params"))
     parser.add_argument("--timeout", type=int, default=None, help="Optional Optuna timeout in seconds")
     parser.add_argument("--show-progress", action="store_true", help="Show Optuna progress bar")
+    parser.add_argument(
+        "--profile-features",
+        action="store_true",
+        help="Enable target profile mean/count features fitted on the training window",
+    )
+    parser.add_argument(
+        "--last-year-features",
+        action="store_true",
+        help="Enable experimental last-year same month/day/hour and year-growth features",
+    )
     return parser.parse_args()
 
 
 def suggest_params(trial: Any, model_name: str) -> dict[str, Any]:
+    model_name = base_model_name(model_name)
     if model_name == "lightgbm":
         return {
             "learning_rate": trial.suggest_float("learning_rate", 0.015, 0.08, log=True),
@@ -63,6 +91,7 @@ def suggest_params(trial: Any, model_name: str) -> dict[str, Any]:
 
 
 def build_trial_model(model_name: str, params: dict[str, Any]) -> Any:
+    model_name = base_model_name(model_name)
     if model_name == "lightgbm":
         require_package("lightgbm")
         from lightgbm import LGBMRegressor
@@ -113,6 +142,7 @@ def fit_trial_model(
     X_valid: Any,
     y_valid: Any,
 ) -> None:
+    model_name = base_model_name(model_name)
     if model_name == "lightgbm":
         from lightgbm import early_stopping, log_evaluation
 
@@ -146,21 +176,44 @@ def main() -> None:
     import optuna
 
     bundle = load_data()
-    train_fe, _ = align_train_test(bundle.train, bundle.test)
-    train_part, valid_part = time_order_split(train_fe, valid_fraction=args.valid_fraction)
-    feature_cols = select_feature_columns(train_fe)
+    train_fe, test_fe = align_train_test(bundle.train, bundle.test)
+    train_part, valid_part = split_train_valid(
+        train_fe,
+        valid_fraction=args.valid_fraction,
+        strategy=args.split_strategy,
+    )
 
-    X_train = train_part[feature_cols]
-    y_train = train_part[TARGET_COL]
-    X_valid = valid_part[feature_cols]
-    y_valid = valid_part[TARGET_COL]
+    if args.last_year_features:
+        encoder = LastYearFeatureEncoder().fit(train_part)
+        train_base = encoder.transform(train_part)
+        valid_base = encoder.transform(valid_part)
+        test_base = encoder.transform(test_fe)
+    else:
+        train_base = train_part
+        valid_base = valid_part
+        test_base = test_fe
+
+    if args.profile_features:
+        train_model, valid_model, _ = add_target_profile_features(train_base, valid_base, test_base)
+    else:
+        train_model = train_base
+        valid_model = valid_base
+
+    feature_cols = select_feature_columns(train_model)
+
+    X_train = train_model[feature_cols]
+    y_train = transform_target(args.model, train_model[TARGET_COL])
+    X_valid = valid_model[feature_cols]
+    y_valid = transform_target(args.model, valid_model[TARGET_COL])
+    y_valid_raw = valid_model[TARGET_COL]
 
     def objective(trial: Any) -> float:
         params = suggest_params(trial, args.model)
         model = build_trial_model(args.model, params)
         fit_trial_model(args.model, model, X_train, y_train, X_valid, y_valid)
-        pred = np.maximum(model.predict(X_valid), 0)
-        score = mse(y_valid, pred)
+        pred = inverse_transform_predictions(args.model, model.predict(X_valid))
+        pred = np.maximum(pred, 0)
+        score = mse(y_valid_raw, pred)
         best_iteration = get_best_iteration(args.model, model)
         if best_iteration is not None:
             trial.set_user_attr("best_iteration", best_iteration)

@@ -1,0 +1,15 @@
+{
+  "model": "xgboost",
+  "valid_mse": 937.1624367723166,
+  "best_iteration": 1783,
+  "params": {
+    "learning_rate": 0.02769702606459157,
+    "max_depth": 7,
+    "min_child_weight": 2.879307211386034,
+    "subsample": 0.7600582865068131,
+    "colsample_bytree": 0.7090979061957605,
+    "reg_alpha": 0.12191212106684857,
+    "reg_lambda": 0.0002460549466197901,
+    "gamma": 4.307355128068071
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "model": "lightgbm_log",
+  "valid_mse": 1037.0677733024206,
+  "best_iteration": 1024,
+  "params": {
+    "learning_rate": 0.02359091748229732,
+    "num_leaves": 75,
+    "max_depth": 9,
+    "min_child_samples": 25,
+    "subsample": 0.775282663931947,
+    "colsample_bytree": 0.6949109520779809,
+    "reg_alpha": 0.0009326341423351982,
+    "reg_lambda": 0.015233140617634346
+  }
+}

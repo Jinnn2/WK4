@@ -14,6 +14,14 @@ PROFILE_KEY_SETS = [
     ["hr"],
 ]
 
+GROWTH_KEY_SETS = [
+    ["mnth", "hr", "workingday"],
+    ["mnth", "workingday"],
+    ["hr", "workingday"],
+    ["mnth"],
+    ["hr"],
+]
+
 
 def add_cyclic_feature(df: pd.DataFrame, col: str, period: int) -> None:
     if col not in df.columns:
@@ -94,6 +102,123 @@ def align_train_test(
 
     test_fe = test_fe[[col for col in train_fe.columns if col in test_fe.columns]]
     return train_fe, test_fe
+
+
+class LastYearFeatureEncoder:
+    """Adds last-year same month/day/hour priors and observed year-growth factors."""
+
+    def __init__(self, smoothing: float = 30.0) -> None:
+        self.smoothing = smoothing
+        self.global_growth_: float = 1.0
+        self.last_year_table_: pd.DataFrame | None = None
+        self.growth_tables_: list[tuple[str, list[str], pd.DataFrame]] = []
+
+    def fit(self, df: pd.DataFrame) -> "LastYearFeatureEncoder":
+        if TARGET_COL not in df.columns:
+            raise ValueError(f"LastYearFeatureEncoder requires target column '{TARGET_COL}'")
+        required = {"yr", "mnth", "day", "hr", "workingday", TARGET_COL}
+        missing = sorted(required - set(df.columns))
+        if missing:
+            raise ValueError(f"LastYearFeatureEncoder missing required columns: {missing}")
+
+        last_year = df[df["yr"] == 0]
+        current_year = df[df["yr"] == 1]
+
+        self.last_year_table_ = (
+            last_year.groupby(["mnth", "day", "hr"], dropna=False)[TARGET_COL]
+            .mean()
+            .reset_index()
+            .rename(columns={TARGET_COL: "last_year_same_mnth_day_hr_cnt"})
+        )
+
+        ly_mean = float(last_year[TARGET_COL].mean()) if len(last_year) else float(df[TARGET_COL].mean())
+        cy_mean = float(current_year[TARGET_COL].mean()) if len(current_year) else float(df[TARGET_COL].mean())
+        self.global_growth_ = cy_mean / ly_mean if ly_mean > 0 else 1.0
+
+        self.growth_tables_ = []
+        for keys in GROWTH_KEY_SETS:
+            if not all(key in df.columns for key in keys):
+                continue
+            ly = (
+                last_year.groupby(keys, dropna=False)[TARGET_COL]
+                .agg(["mean", "count"])
+                .reset_index()
+                .rename(columns={"mean": "ly_mean", "count": "ly_count"})
+            )
+            cy = (
+                current_year.groupby(keys, dropna=False)[TARGET_COL]
+                .agg(["mean", "count"])
+                .reset_index()
+                .rename(columns={"mean": "cy_mean", "count": "cy_count"})
+            )
+            table = ly.merge(cy, on=keys, how="inner")
+            if table.empty:
+                continue
+            raw_growth = table["cy_mean"] / table["ly_mean"].replace(0, np.nan)
+            support = table["ly_count"] + table["cy_count"]
+            table["growth"] = (
+                raw_growth.fillna(self.global_growth_) * support
+                + self.global_growth_ * self.smoothing
+            ) / (support + self.smoothing)
+            name = "growth_" + "_".join(keys)
+            table = table[keys + ["growth"]].rename(columns={"growth": name})
+            self.growth_tables_.append((name, keys, table))
+        return self
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.last_year_table_ is None:
+            raise RuntimeError("LastYearFeatureEncoder must be fitted before transform")
+
+        out = df.copy()
+        out = out.merge(self.last_year_table_, on=["mnth", "day", "hr"], how="left")
+        has_prior_year = out["yr"] > 0 if "yr" in out.columns else pd.Series(True, index=out.index)
+        exact_match = out["last_year_same_mnth_day_hr_cnt"].notna() & has_prior_year
+
+        fallback_keys = ["mnth", "hr"]
+        if all(key in out.columns for key in fallback_keys):
+            fallback = self.last_year_table_.groupby(fallback_keys)[
+                "last_year_same_mnth_day_hr_cnt"
+            ].mean().reset_index()
+            fallback = fallback.rename(
+                columns={"last_year_same_mnth_day_hr_cnt": "last_year_mnth_hr_cnt"}
+            )
+            out = out.merge(fallback, on=fallback_keys, how="left")
+        else:
+            out["last_year_mnth_hr_cnt"] = np.nan
+
+        out.loc[~has_prior_year, "last_year_same_mnth_day_hr_cnt"] = np.nan
+        out.loc[~has_prior_year, "last_year_mnth_hr_cnt"] = np.nan
+        out["last_year_same_mnth_day_hr_cnt"] = out[
+            "last_year_same_mnth_day_hr_cnt"
+        ].fillna(out["last_year_mnth_hr_cnt"])
+        out["last_year_same_mnth_day_hr_cnt"] = out[
+            "last_year_same_mnth_day_hr_cnt"
+        ].fillna(0.0)
+        out["has_last_year_same_mnth_day_hr"] = exact_match.astype(int)
+
+        growth_cols: list[str] = []
+        for name, keys, table in self.growth_tables_:
+            out = out.merge(table, on=keys, how="left")
+            growth_cols.append(name)
+
+        if growth_cols:
+            out["year_growth_factor"] = out[growth_cols].bfill(axis=1).iloc[:, 0]
+            for col in growth_cols:
+                out[col] = out[col].fillna(self.global_growth_)
+        else:
+            out["year_growth_factor"] = self.global_growth_
+        out["year_growth_factor"] = out["year_growth_factor"].fillna(self.global_growth_)
+        out.loc[~has_prior_year, "year_growth_factor"] = 1.0
+        out["last_year_growth_adjusted_cnt"] = (
+            out["last_year_same_mnth_day_hr_cnt"] * out["year_growth_factor"]
+        )
+        out["last_year_residual_vs_growth"] = (
+            out["last_year_growth_adjusted_cnt"] - out["last_year_same_mnth_day_hr_cnt"]
+        )
+        return out
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.fit(df).transform(df)
 
 
 class TargetProfileEncoder:

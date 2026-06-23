@@ -96,8 +96,31 @@ def require_package(import_name: str, install_name: str | None = None) -> None:
         )
 
 
-def default_model_params(name: str) -> dict[str, Any]:
+def base_model_name(name: str) -> str:
     normalized = name.lower().strip()
+    if normalized.endswith("_log"):
+        return normalized[: -len("_log")]
+    return normalized
+
+
+def uses_log_target(name: str) -> bool:
+    return name.lower().strip().endswith("_log")
+
+
+def transform_target(model_name: str, y: pd.Series) -> pd.Series | np.ndarray:
+    if uses_log_target(model_name):
+        return np.log1p(y)
+    return y
+
+
+def inverse_transform_predictions(model_name: str, pred: np.ndarray) -> np.ndarray:
+    if uses_log_target(model_name):
+        return np.expm1(pred)
+    return pred
+
+
+def default_model_params(name: str) -> dict[str, Any]:
+    normalized = base_model_name(name)
     if normalized == "random_forest":
         return {
             "n_estimators": 500,
@@ -164,7 +187,7 @@ def build_model(
     n_estimators: int | None = None,
     params: dict[str, Any] | None = None,
 ) -> Regressor:
-    normalized = name.lower().strip()
+    normalized = base_model_name(name)
     if normalized == "mean":
         return MeanRegressor()
     if normalized == "hour_profile":
@@ -217,7 +240,7 @@ def build_model(
 
 
 def supports_early_stopping(model_name: str) -> bool:
-    return model_name.lower().strip() in {"lightgbm", "xgboost", "catboost"}
+    return base_model_name(model_name) in {"lightgbm", "xgboost", "catboost"}
 
 
 def fit_model(
@@ -228,7 +251,7 @@ def fit_model(
     X_valid: pd.DataFrame | None = None,
     y_valid: pd.Series | None = None,
 ) -> Regressor:
-    normalized = model_name.lower().strip()
+    normalized = base_model_name(model_name)
     if X_valid is None or y_valid is None or not supports_early_stopping(normalized):
         model.fit(X_train, y_train)
         return model
@@ -273,7 +296,7 @@ def fit_model(
 
 
 def get_best_iteration(model_name: str, model: Regressor) -> int | None:
-    normalized = model_name.lower().strip()
+    normalized = base_model_name(model_name)
     if normalized == "lightgbm":
         best_iteration = getattr(model, "best_iteration_", None)
         return int(best_iteration) if best_iteration else None
@@ -295,8 +318,11 @@ def train_and_evaluate(
     params: dict[str, Any] | None = None,
 ) -> TrainResult:
     model = build_model(model_name, params=params)
-    fit_model(model_name, model, X_train, y_train, X_valid, y_valid)
-    valid_pred = np.maximum(model.predict(X_valid), 0)
+    y_train_fit = transform_target(model_name, y_train)
+    y_valid_fit = transform_target(model_name, y_valid)
+    fit_model(model_name, model, X_train, y_train_fit, X_valid, y_valid_fit)
+    valid_pred = inverse_transform_predictions(model_name, model.predict(X_valid))
+    valid_pred = np.maximum(valid_pred, 0)
     best_iteration = get_best_iteration(model_name, model)
     return TrainResult(
         name=model_name,

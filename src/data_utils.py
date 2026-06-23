@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
-from .config import DATE_COL, ID_COL, TARGET_COL, TEST_PATH, TRAIN_PATH, VALID_FRACTION
+from .config import DATE_COL, ID_COL, SEED, TARGET_COL, TEST_PATH, TRAIN_PATH, VALID_FRACTION
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,35 @@ def time_order_split(
     return train_part, valid_part
 
 
+def random_split(
+    train: pd.DataFrame,
+    valid_fraction: float = VALID_FRACTION,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not 0 < valid_fraction < 1:
+        raise ValueError("valid_fraction must be between 0 and 1")
+
+    train_part, valid_part = train_test_split(
+        train,
+        test_size=valid_fraction,
+        random_state=SEED,
+        shuffle=True,
+    )
+    return train_part.sort_index().copy(), valid_part.sort_index().copy()
+
+
+def split_train_valid(
+    train: pd.DataFrame,
+    valid_fraction: float = VALID_FRACTION,
+    strategy: str = "random",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    normalized = strategy.lower().strip()
+    if normalized == "random":
+        return random_split(train, valid_fraction=valid_fraction)
+    if normalized == "time":
+        return time_order_split(train, valid_fraction=valid_fraction)
+    raise ValueError("split strategy must be 'random' or 'time'")
+
+
 def select_feature_columns(df: pd.DataFrame) -> list[str]:
     drop_cols = {
         TARGET_COL,
@@ -60,4 +90,3 @@ def select_feature_columns(df: pd.DataFrame) -> list[str]:
         "registered",
     }
     return [col for col in df.columns if col not in drop_cols]
-

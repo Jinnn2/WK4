@@ -56,13 +56,16 @@ python main.py --models hist_gradient_boosting,lightgbm,xgboost,catboost --outpu
 运行当前已调参的推荐融合：
 
 ```bash
-python main.py --models hist_gradient_boosting,lightgbm,xgboost,catboost --params-dir output/params --output output/submission_tuned_xgb_4model.csv
+python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_random --output output/submission_best_4model_random.csv
 ```
 
-如需重新调参，可先运行：
+如需重新调参，可分别运行：
 
 ```bash
-python src/tune_optuna.py --model xgboost --trials 30 --output-dir output/params
+python src/tune_optuna.py --model lightgbm --trials 40 --split-strategy random --output-dir output/params_random
+python src/tune_optuna.py --model lightgbm_log --trials 30 --split-strategy random --output-dir output/params_random
+python src/tune_optuna.py --model xgboost --trials 40 --split-strategy random --output-dir output/params_random
+python src/tune_optuna.py --model xgboost_log --trials 30 --split-strategy random --output-dir output/params_random
 ```
 
 也可以单独对比 LightGBM、XGBoost、CatBoost：
@@ -80,8 +83,9 @@ docs/                  文档与方案说明
 notebooks/             预留 EDA 笔记本目录
 output/                生成的提交文件
 src/config.py          路径、列名和随机种子配置
-src/data_utils.py      数据读取、字段检查、时间顺序切分
+src/data_utils.py      数据读取、字段检查、随机/时间验证切分
 src/features.py        日期、周期、高峰期、天气交互等特征工程
+src/lag_features.py    递归 lag/rolling 特征实验
 src/models.py          基线模型和树模型构建
 src/ensemble.py        验证集加权融合搜索
 src/make_submission.py 提交文件生成
@@ -111,15 +115,42 @@ lightgbm valid MSE: 3743.9244
 xgboost valid MSE: 3587.8082
 catboost valid MSE: 4821.9862
 4-model ensemble valid MSE: 3523.2145
+tuned lightgbm valid MSE: 3383.7156
+tuned lightgbm_log valid MSE: 3454.6130
 tuned xgboost valid MSE: 3534.1538
-tuned-xgb 4-model ensemble valid MSE: 3481.3420
+tuned xgboost_log valid MSE: 3640.3058
+raw/log 4-model ensemble valid MSE: 3147.5131
+random-split raw/log 4-model ensemble valid MSE: 898.7861
 ```
 
 因此当前推荐提交路径为：
 
 ```bash
-python main.py --models hist_gradient_boosting,lightgbm,xgboost,catboost --params-dir output/params --output output/submission_tuned_xgb_4model.csv
+python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_random --output output/submission_best_4model_random.csv
 ```
+
+默认验证策略为随机切分。如果要保守模拟未来时间段预测，可追加 `--split-strategy time`。如果评测平台接受浮点预测，可以追加 `--no-round` 生成不四舍五入的提交文件。
+
+## 实验开关
+
+仓库中保留了若干连续时间序列特征实验，但默认关闭，因为当前时间顺序验证下没有超过主方案：
+
+```bash
+python main.py --models lightgbm --params-dir output/params --last-year-features
+python main.py --models lightgbm --params-dir output/params --lag-features
+python main.py --models lightgbm --params-dir output/params --profile-features
+```
+
+已验证现象：
+
+```text
+target profile features 4-model ensemble MSE: 3794.4738
+last-year features 4-model ensemble MSE: 3929.3378
+last-year features tuned LightGBM MSE: 4768.8591
+recursive lag features LightGBM MSE: 17799.2725
+```
+
+其中递归 lag 会在验证阶段逐小时预测并回写历史，逻辑更接近真实测试；当前退化主要来自误差递归传播。
 
 更完整的设计说明见 [docs/solution_design.md](docs/solution_design.md)。
 
@@ -128,16 +159,16 @@ python main.py --models hist_gradient_boosting,lightgbm,xgboost,catboost --param
 运行完成后会生成：
 
 ```text
-output/submission_tuned_xgb_4model.csv
+output/submission_best_4model_random.csv
 ```
 
 示例格式：
 
 ```text
 ID,cnt
-13904,272
-13905,269
-13906,256
+13904,282
+13905,276
+13906,261
 ```
 
 预测值会先截断为非负数，默认再四舍五入为整数，以符合共享单车租借量的计数语义。
