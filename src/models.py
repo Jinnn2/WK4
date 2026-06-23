@@ -12,6 +12,24 @@ from .config import SEED
 
 EARLY_STOPPING_ROUNDS = 100
 
+CATEGORICAL_COLUMNS = [
+    "season",
+    "yr",
+    "mnth",
+    "hr",
+    "holiday",
+    "weekday",
+    "workingday",
+    "weathersit",
+    "is_weekend",
+    "is_morning_rush",
+    "is_evening_rush",
+    "is_rush_hour",
+    "is_night",
+    "is_work_hour",
+    "bad_weather",
+]
+
 
 class Regressor(Protocol):
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "Regressor":
@@ -103,6 +121,17 @@ def base_model_name(name: str) -> str:
     return normalized
 
 
+def core_model_name(name: str) -> str:
+    normalized = base_model_name(name)
+    if normalized.endswith("_cat"):
+        return normalized[: -len("_cat")]
+    return normalized
+
+
+def uses_categorical_features(name: str) -> bool:
+    return base_model_name(name).endswith("_cat")
+
+
 def uses_log_target(name: str) -> bool:
     return name.lower().strip().endswith("_log")
 
@@ -120,7 +149,7 @@ def inverse_transform_predictions(model_name: str, pred: np.ndarray) -> np.ndarr
 
 
 def default_model_params(name: str) -> dict[str, Any]:
-    normalized = base_model_name(name)
+    normalized = core_model_name(name)
     if normalized == "random_forest":
         return {
             "n_estimators": 500,
@@ -187,7 +216,7 @@ def build_model(
     n_estimators: int | None = None,
     params: dict[str, Any] | None = None,
 ) -> Regressor:
-    normalized = base_model_name(name)
+    normalized = core_model_name(name)
     if normalized == "mean":
         return MeanRegressor()
     if normalized == "hour_profile":
@@ -240,7 +269,24 @@ def build_model(
 
 
 def supports_early_stopping(model_name: str) -> bool:
-    return base_model_name(model_name) in {"lightgbm", "xgboost", "catboost"}
+    return core_model_name(model_name) in {"lightgbm", "xgboost", "catboost"}
+
+
+def categorical_columns_in(X: pd.DataFrame) -> list[str]:
+    return [col for col in CATEGORICAL_COLUMNS if col in X.columns]
+
+
+def prepare_features_for_model(model_name: str, X: pd.DataFrame) -> pd.DataFrame:
+    if not uses_categorical_features(model_name):
+        return X
+    out = X.copy()
+    normalized = core_model_name(model_name)
+    for col in categorical_columns_in(out):
+        if normalized == "catboost":
+            out[col] = out[col].astype("int64").astype(str)
+        else:
+            out[col] = out[col].astype("int64").astype("category")
+    return out
 
 
 def fit_model(
@@ -251,19 +297,27 @@ def fit_model(
     X_valid: pd.DataFrame | None = None,
     y_valid: pd.Series | None = None,
 ) -> Regressor:
-    normalized = base_model_name(model_name)
+    normalized = core_model_name(model_name)
+    X_train_fit = prepare_features_for_model(model_name, X_train)
+    X_valid_fit = prepare_features_for_model(model_name, X_valid) if X_valid is not None else None
     if X_valid is None or y_valid is None or not supports_early_stopping(normalized):
-        model.fit(X_train, y_train)
+        if normalized == "catboost" and uses_categorical_features(model_name):
+            model.fit(X_train_fit, y_train, cat_features=categorical_columns_in(X_train_fit))
+        else:
+            model.fit(X_train_fit, y_train)
         return model
 
     if normalized == "lightgbm":
         from lightgbm import early_stopping, log_evaluation
 
         model.fit(
-            X_train,
+            X_train_fit,
             y_train,
-            eval_set=[(X_valid, y_valid)],
+            eval_set=[(X_valid_fit, y_valid)],
             eval_metric="l2",
+            categorical_feature=categorical_columns_in(X_train_fit)
+            if uses_categorical_features(model_name)
+            else "auto",
             callbacks=[
                 early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
                 log_evaluation(0),
@@ -273,30 +327,33 @@ def fit_model(
 
     if normalized == "xgboost":
         model.fit(
-            X_train,
+            X_train_fit,
             y_train,
-            eval_set=[(X_valid, y_valid)],
+            eval_set=[(X_valid_fit, y_valid)],
             verbose=False,
         )
         return model
 
     if normalized == "catboost":
         model.fit(
-            X_train,
+            X_train_fit,
             y_train,
-            eval_set=(X_valid, y_valid),
+            cat_features=categorical_columns_in(X_train_fit)
+            if uses_categorical_features(model_name)
+            else None,
+            eval_set=(X_valid_fit, y_valid),
             early_stopping_rounds=EARLY_STOPPING_ROUNDS,
             use_best_model=True,
             verbose=False,
         )
         return model
 
-    model.fit(X_train, y_train)
+    model.fit(X_train_fit, y_train)
     return model
 
 
 def get_best_iteration(model_name: str, model: Regressor) -> int | None:
-    normalized = base_model_name(model_name)
+    normalized = core_model_name(model_name)
     if normalized == "lightgbm":
         best_iteration = getattr(model, "best_iteration_", None)
         return int(best_iteration) if best_iteration else None
@@ -321,7 +378,8 @@ def train_and_evaluate(
     y_train_fit = transform_target(model_name, y_train)
     y_valid_fit = transform_target(model_name, y_valid)
     fit_model(model_name, model, X_train, y_train_fit, X_valid, y_valid_fit)
-    valid_pred = inverse_transform_predictions(model_name, model.predict(X_valid))
+    X_valid_fit = prepare_features_for_model(model_name, X_valid)
+    valid_pred = inverse_transform_predictions(model_name, model.predict(X_valid_fit))
     valid_pred = np.maximum(valid_pred, 0)
     best_iteration = get_best_iteration(model_name, model)
     return TrainResult(

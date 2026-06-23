@@ -16,9 +16,13 @@ from src.data_utils import load_data, select_feature_columns, split_train_valid
 from src.features import LastYearFeatureEncoder, add_target_profile_features, align_train_test
 from src.models import (
     base_model_name,
+    build_model,
+    core_model_name,
+    fit_model,
     get_best_iteration,
     inverse_transform_predictions,
     mse,
+    prepare_features_for_model,
     require_package,
     transform_target,
 )
@@ -28,15 +32,34 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune tree models with Optuna.")
     parser.add_argument(
         "--model",
-        choices=["lightgbm", "xgboost", "catboost", "lightgbm_log", "xgboost_log", "catboost_log"],
+        choices=[
+            "lightgbm",
+            "xgboost",
+            "catboost",
+            "lightgbm_log",
+            "xgboost_log",
+            "catboost_log",
+            "lightgbm_cat",
+            "catboost_cat",
+            "lightgbm_cat_log",
+            "catboost_cat_log",
+        ],
         default="xgboost",
     )
     parser.add_argument("--trials", type=int, default=40)
     parser.add_argument("--valid-fraction", type=float, default=VALID_FRACTION)
     parser.add_argument(
+        "--valid-size",
+        default="test",
+        help=(
+            "Chronological validation size. Use 'test' to match the test row count, "
+            "'fraction' to use --valid-fraction, or an integer row count."
+        ),
+    )
+    parser.add_argument(
         "--split-strategy",
         choices=["random", "time"],
-        default="random",
+        default="time",
         help="Validation split strategy used by the tuning objective.",
     )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR / "params"))
@@ -55,8 +78,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_valid_size(value: str, test_rows: int) -> int | None:
+    normalized = value.lower().strip()
+    if normalized == "test":
+        return test_rows
+    if normalized in {"fraction", "none"}:
+        return None
+    try:
+        return int(normalized)
+    except ValueError as exc:
+        raise ValueError("--valid-size must be 'test', 'fraction', or an integer") from exc
+
+
 def suggest_params(trial: Any, model_name: str) -> dict[str, Any]:
-    model_name = base_model_name(model_name)
+    model_name = core_model_name(model_name)
     if model_name == "lightgbm":
         return {
             "learning_rate": trial.suggest_float("learning_rate", 0.015, 0.08, log=True),
@@ -91,47 +126,7 @@ def suggest_params(trial: Any, model_name: str) -> dict[str, Any]:
 
 
 def build_trial_model(model_name: str, params: dict[str, Any]) -> Any:
-    model_name = base_model_name(model_name)
-    if model_name == "lightgbm":
-        require_package("lightgbm")
-        from lightgbm import LGBMRegressor
-
-        return LGBMRegressor(
-            objective="regression",
-            n_estimators=3000,
-            random_state=42,
-            n_jobs=-1,
-            verbose=-1,
-            **params,
-        )
-    if model_name == "xgboost":
-        require_package("xgboost")
-        from xgboost import XGBRegressor
-
-        return XGBRegressor(
-            objective="reg:squarederror",
-            eval_metric="rmse",
-            n_estimators=2500,
-            random_state=42,
-            tree_method="hist",
-            n_jobs=-1,
-            early_stopping_rounds=100,
-            **params,
-        )
-    if model_name == "catboost":
-        require_package("catboost")
-        from catboost import CatBoostRegressor
-
-        return CatBoostRegressor(
-            loss_function="RMSE",
-            eval_metric="RMSE",
-            iterations=3000,
-            random_seed=42,
-            verbose=False,
-            allow_writing_files=False,
-            **params,
-        )
-    raise ValueError(f"Unsupported model for tuning: {model_name}")
+    return build_model(model_name, params=params)
 
 
 def fit_trial_model(
@@ -142,32 +137,7 @@ def fit_trial_model(
     X_valid: Any,
     y_valid: Any,
 ) -> None:
-    model_name = base_model_name(model_name)
-    if model_name == "lightgbm":
-        from lightgbm import early_stopping, log_evaluation
-
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_valid, y_valid)],
-            eval_metric="l2",
-            callbacks=[early_stopping(100, verbose=False), log_evaluation(0)],
-        )
-        return
-    if model_name == "xgboost":
-        model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
-        return
-    if model_name == "catboost":
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=(X_valid, y_valid),
-            early_stopping_rounds=100,
-            use_best_model=True,
-            verbose=False,
-        )
-        return
-    raise ValueError(f"Unsupported model for tuning: {model_name}")
+    fit_model(model_name, model, X_train, y_train, X_valid, y_valid)
 
 
 def main() -> None:
@@ -177,10 +147,12 @@ def main() -> None:
 
     bundle = load_data()
     train_fe, test_fe = align_train_test(bundle.train, bundle.test)
+    valid_size = resolve_valid_size(args.valid_size, len(test_fe))
     train_part, valid_part = split_train_valid(
         train_fe,
         valid_fraction=args.valid_fraction,
         strategy=args.split_strategy,
+        valid_size=valid_size if args.split_strategy == "time" else None,
     )
 
     if args.last_year_features:
@@ -211,7 +183,8 @@ def main() -> None:
         params = suggest_params(trial, args.model)
         model = build_trial_model(args.model, params)
         fit_trial_model(args.model, model, X_train, y_train, X_valid, y_valid)
-        pred = inverse_transform_predictions(args.model, model.predict(X_valid))
+        X_valid_fit = prepare_features_for_model(args.model, X_valid)
+        pred = inverse_transform_predictions(args.model, model.predict(X_valid_fit))
         pred = np.maximum(pred, 0)
         score = mse(y_valid_raw, pred)
         best_iteration = get_best_iteration(args.model, model)

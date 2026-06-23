@@ -39,11 +39,17 @@ def validate_schema(train: pd.DataFrame, test: pd.DataFrame) -> None:
 def time_order_split(
     train: pd.DataFrame,
     valid_fraction: float = VALID_FRACTION,
+    valid_size: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not 0 < valid_fraction < 1:
-        raise ValueError("valid_fraction must be between 0 and 1")
+    if valid_size is not None:
+        if valid_size <= 0 or valid_size >= len(train):
+            raise ValueError("valid_size must be positive and smaller than the training row count")
+        split_idx = len(train) - valid_size
+    else:
+        if not 0 < valid_fraction < 1:
+            raise ValueError("valid_fraction must be between 0 and 1")
 
-    split_idx = int(len(train) * (1 - valid_fraction))
+        split_idx = int(len(train) * (1 - valid_fraction))
     if split_idx <= 0 or split_idx >= len(train):
         raise ValueError("validation split produced an empty train or valid set")
 
@@ -72,12 +78,15 @@ def split_train_valid(
     train: pd.DataFrame,
     valid_fraction: float = VALID_FRACTION,
     strategy: str = "random",
+    valid_size: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     normalized = strategy.lower().strip()
+    if valid_size is not None and normalized != "time":
+        raise ValueError("valid_size is only supported with time split strategy")
     if normalized == "random":
         return random_split(train, valid_fraction=valid_fraction)
     if normalized == "time":
-        return time_order_split(train, valid_fraction=valid_fraction)
+        return time_order_split(train, valid_fraction=valid_fraction, valid_size=valid_size)
     raise ValueError("split strategy must be 'random' or 'time'")
 
 

@@ -33,14 +33,14 @@ ID,dteday,season,yr,mnth,hr,holiday,weekday,workingday,weathersit,temp,atemp,hum
 
 ## 3. 验证策略
 
-本数据是按小时排列的表格数据，测试集 ID 接在训练集之后。工程目前支持两种验证策略：
+本数据是按小时排列的连续时间序列，测试集 ID 接在训练集之后。训练集最后一条为 `2012/8/7 11:00`，测试集第一条为 `2012/8/7 12:00`，测试集一直连续到 `2012/12/31 23:00`，共 3476 小时。因此本题更接近“用历史预测未来 3476 小时”，而不是独立随机样本回归。工程目前支持两种验证策略：
 
 ```text
 random: 随机抽取 20% 作为验证集
-time: 前 80% 训练，后 20% 验证
+time: 按时间顺序取最后一段作为验证集
 ```
 
-如果认为课程隐藏测试集更接近从整体分布中抽样，随机验证更合适；如果希望保守模拟“用历史预测未来”，则使用时间顺序验证。当前用户指定采用随机验证，因此主流程默认 `--split-strategy random`，并保留 `--split-strategy time` 作为对照。
+随机验证会混入未来分布，之前得到的 MSE 约 900，提交反馈却仍在 3600+，说明它过于乐观。当前主流程默认 `--split-strategy time --valid-size test`，即使用训练集最后 3476 小时作为验证集，使验证 horizon 与测试 horizon 一致。若要复现旧的 20% 时间窗口，可使用 `--valid-size fraction`；若仅做对照，可使用 `--split-strategy random --valid-size fraction`。
 
 对应实现位于 `src/data_utils.py` 的 `split_train_valid`。
 
@@ -105,21 +105,24 @@ time: 前 80% 训练，后 20% 验证
 
 ### 4.5 连续时间特征实验
 
-根据数据连续性，工程进一步实现了两类时间序列特征实验。
+根据数据连续性，工程进一步实现了三类时间序列特征实验。
 
 第一类是去年同期特征：`LastYearFeatureEncoder` 会构造去年同月同日同小时租借量、同比增长因子和增长调整后的去年同期先验。该特征默认关闭，可通过 `--last-year-features` 开启。
 
 第二类是递归 lag/rolling 特征：`src/lag_features.py` 支持 `lag_1`、`lag_24`、`lag_168`、`rolling_mean_24`、`rolling_mean_168` 等特征。开启 `--lag-features` 后，验证集和测试集都会逐小时预测，并将预测值写回历史缓存，以模拟真实提交时没有未来 `cnt` 的情况。
 
-当前这两类实验在本地时间顺序验证中未超过主方案：
+第三类是季节性自回归残差模型：`src/seasonal_arx.py` 支持 `seasonal_arx_lightgbm` 等模型名，先构造去年同月同日同小时的季节性先验，再训练 log 残差模型，并在验证/测试阶段逐小时递归预测。
+
+这些实验都按“不使用未来真实 cnt”的方式验证。当前结果显示它们未超过主方案：
 
 ```text
 last-year features 4-model ensemble MSE: 3929.3378
 last-year features tuned LightGBM MSE: 4768.8591
 recursive lag features LightGBM MSE: 17799.2725
+test-length seasonal_arx_lightgbm MSE: 18275.5949
 ```
 
-去年同期特征在当前 80/20 验证段上可能和训练分布错位；递归 lag 特征容易在早期预测偏低后向后传播误差。因此它们保留为实验开关，而不是默认提交路径。
+去年同期特征在当前数据上并不是足够强的锚点，纯季节性 baseline 在测试等长验证窗口上 MSE 约 3 万；递归 lag 特征容易在早期预测偏低后向后传播误差。因此这些方法保留为实验开关，而不是默认提交路径。当前更稳的主线是：使用测试等长时间窗口重新调参静态 GBDT，并通过 raw/log 目标融合降低误差。
 
 ## 5. 模型设计
 
@@ -176,39 +179,39 @@ catboost best iteration: 1223
 
 工程已实现 `src/tune_optuna.py`，用于对 LightGBM、XGBoost、CatBoost 做自动超参数搜索。调参脚本会在时间顺序验证集上最小化 MSE，并把最优参数保存为 JSON 文件。
 
-当前已对 LightGBM、XGBoost 及其 log 目标变体运行调参：
+当前已按测试等长验证窗口对 LightGBM、XGBoost 及其 log 目标变体运行调参：
 
 ```bash
-python src/tune_optuna.py --model lightgbm --trials 40 --split-strategy random --output-dir output/params_random
-python src/tune_optuna.py --model lightgbm_log --trials 30 --split-strategy random --output-dir output/params_random
-python src/tune_optuna.py --model xgboost --trials 40 --split-strategy random --output-dir output/params_random
-python src/tune_optuna.py --model xgboost_log --trials 30 --split-strategy random --output-dir output/params_random
+python src/tune_optuna.py --model lightgbm --trials 40 --split-strategy time --valid-size test --output-dir output/params_testwindow
+python src/tune_optuna.py --model lightgbm_log --trials 40 --split-strategy time --valid-size test --output-dir output/params_testwindow
+python src/tune_optuna.py --model xgboost --trials 30 --split-strategy time --valid-size test --output-dir output/params_testwindow
+python src/tune_optuna.py --model xgboost_log --trials 40 --split-strategy time --valid-size test --output-dir output/params_testwindow
 ```
 
 得到的结果为：
 
 ```text
-random tuned lightgbm valid MSE: 953.3727
-random tuned lightgbm best iteration: 1202
-random tuned lightgbm_log valid MSE: 1037.0678
-random tuned lightgbm_log best iteration: 1024
-random tuned xgboost valid MSE: 937.1624
-random tuned xgboost best iteration: 1783
-random tuned xgboost_log valid MSE: 1040.5746
-random tuned xgboost_log best iteration: 351
+test-window tuned lightgbm valid MSE: 5819.6270
+test-window tuned lightgbm best iteration: 426
+test-window tuned lightgbm_log valid MSE: 6110.8987
+test-window tuned lightgbm_log best iteration: 622
+test-window tuned xgboost valid MSE: 5733.5982
+test-window tuned xgboost best iteration: 2500
+test-window tuned xgboost_log valid MSE: 7254.5814
+test-window tuned xgboost_log best iteration: 390
 ```
 
 主训练入口可通过 `--params-dir` 自动读取调参结果：
 
 ```bash
-python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_random --output output/submission_best_4model_random.csv
+python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_testwindow --output output/submission_best_testwindow_tuned.csv
 ```
 
 ## 6. 模型融合
 
 当同时训练多个模型时，程序会在验证集上保存每个模型的预测结果，然后用网格搜索寻找加权平均的最佳权重，使验证集 MSE 最小。
 
-如果某个模型明显强于其他模型，融合权重会自然偏向该模型。当前已验证的四模型融合结果为：
+如果某个模型明显强于其他模型，融合权重会自然偏向该模型。早期 20% 时间窗口下，四模型融合结果为：
 
 ```text
 hist_gradient_boosting valid MSE: 3828.6904
@@ -219,7 +222,7 @@ ensemble weights: hist_gradient_boosting=0.25, lightgbm=0.05, xgboost=0.60, catb
 ensemble valid MSE: 3523.2145
 ```
 
-融合后的验证 MSE 低于任一单模型。进一步加入调参后的 raw/log 目标模型，得到：
+进一步加入调参后的 raw/log 目标模型，在同一 20% 时间窗口下得到：
 
 ```text
 tuned lightgbm valid MSE: 3383.7156
@@ -230,7 +233,7 @@ ensemble weights: lightgbm=0.40, lightgbm_log=0.40, xgboost=0.15, xgboost_log=0.
 ensemble valid MSE: 3147.5131
 ```
 
-在随机验证策略下重新调参并融合，得到：
+随机验证策略下重新调参并融合，曾得到：
 
 ```text
 random tuned lightgbm valid MSE: 953.3727
@@ -241,7 +244,34 @@ ensemble weights: lightgbm=0.30, lightgbm_log=0.20, xgboost=0.40, xgboost_log=0.
 ensemble valid MSE: 898.7861
 ```
 
-因此当前更推荐随机验证下调参得到的 LightGBM/XGBoost raw/log 四模型融合结果。
+这些历史结果说明融合有效，但随机验证和短窗口时间验证都偏乐观。当前推荐以测试集等长时间窗口为准，该窗口下重新调参并融合后得到：
+
+```text
+lightgbm valid MSE: 5819.6270
+lightgbm_log valid MSE: 6110.8987
+xgboost valid MSE: 5733.5982
+xgboost_log valid MSE: 7254.5814
+ensemble weights: lightgbm=0.15, lightgbm_log=0.30, xgboost=0.55, xgboost_log=0.00
+ensemble valid MSE: 5512.2698
+```
+
+因此当前更推荐测试等长时间窗口下调参得到的 LightGBM/XGBoost raw/log 四模型融合结果。
+
+类别特征进一步实验显示，`catboost_cat` 会把 `season`、`mnth`、`hr`、`weekday`、`workingday`、`weathersit` 等离散列作为类别特征输入 CatBoost。未完整调参的 `catboost_cat` 在随机验证中单模型 MSE 为 `994.3666`，加入融合后得到：
+
+```text
+ensemble weights: lightgbm=0.22, lightgbm_log=0.17, xgboost=0.32, xgboost_log=0.08, lightgbm_cat=0.00, catboost_cat=0.22
+random ensemble valid MSE: 890.7194
+```
+
+同一组模型在时间切分验证上为：
+
+```text
+time ensemble valid MSE: 3478.9970
+catboost_cat weight: 0.00
+```
+
+这说明类别特征对随机验证有小幅收益，但随机验证和未来时间段测试之间仍存在明显分布差。由于测试集 MSE 反馈仍在 3600 左右，当前主方案切回连续最后一段验证，`catboost_cat` 暂不进入主提交融合。
 
 另有一次历史画像特征实验：构造同月同小时同工作日等 target profile 特征后，四模型融合 MSE 退化到 `3794.4738`，说明该特征在当前时间切分下引入了分布偏差。代码中保留 `--profile-features` 作为实验开关，但默认关闭。
 
@@ -278,7 +308,7 @@ ID,cnt
 当前推荐提交方案为：
 
 ```bash
-python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_random --output output/submission_best_4model_random.csv
+python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir output/params_testwindow --output output/submission_best_testwindow_tuned.csv
 ```
 
 如果平台接受浮点 `cnt`，可以追加 `--no-round` 生成浮点预测提交；若平台示例或规则要求整数，则保持默认四舍五入。
@@ -292,6 +322,7 @@ python main.py --models lightgbm,lightgbm_log,xgboost,xgboost_log --params-dir o
 - LightGBM、XGBoost、CatBoost 已使用 early stopping 控制迭代轮数；
 - LightGBM、XGBoost 及其 log 目标变体已通过 Optuna 调参；
 - raw 目标模型和 log 目标模型误差形态不同，融合后验证 MSE 显著低于任一单模型；
+- `catboost_cat` 显式处理类别特征，在随机验证融合中获得正权重，但在时间切分验证中权重为 0，因此暂不进入主提交；
 - 输出文件满足题目要求的 `ID,cnt` 格式。
 
 后续若继续提分，可优先尝试：

@@ -1,0 +1,149 @@
+{
+  "data": {
+    "train_shape": [
+      13903,
+      15
+    ],
+    "test_shape": [
+      3476,
+      14
+    ],
+    "train_id_range": [
+      1,
+      13903
+    ],
+    "test_id_range": [
+      13904,
+      17379
+    ],
+    "train_date_range": [
+      "2011-01-01",
+      "2012-08-07"
+    ],
+    "test_date_range": [
+      "2012-08-07",
+      "2012-12-31"
+    ]
+  },
+  "validation": {
+    "method": "last 20% by chronological ID order",
+    "train_rows": 11122,
+    "valid_rows": 2781
+  },
+  "features": {
+    "count": 52,
+    "columns": [
+      "season",
+      "yr",
+      "mnth",
+      "hr",
+      "holiday",
+      "weekday",
+      "workingday",
+      "weathersit",
+      "temp",
+      "atemp",
+      "hum",
+      "windspeed",
+      "date_ord",
+      "day",
+      "dayofyear",
+      "weekofyear",
+      "is_month_start",
+      "is_month_end",
+      "is_weekend",
+      "is_sleep_hour",
+      "is_morning_rush",
+      "is_evening_rush",
+      "is_rush_hour",
+      "workday_morning_rush",
+      "workday_evening_rush",
+      "nonworkday_daytime",
+      "hr_sin",
+      "hr_cos",
+      "weekday_sin",
+      "weekday_cos",
+      "mnth_sin",
+      "mnth_cos",
+      "dayofyear_sin",
+      "dayofyear_cos",
+      "temp_diff",
+      "temp_sq",
+      "hum_sq",
+      "windspeed_sq",
+      "temp_x_hum",
+      "temp_x_wind",
+      "hum_x_wind",
+      "bad_weather",
+      "pleasant_weather",
+      "weather_x_hour",
+      "season_x_hour",
+      "season_x_temp",
+      "hist_hour_mean",
+      "hist_working_hour_mean",
+      "hist_month_hour_mean",
+      "hist_weather_hour_mean",
+      "hist_season_hour_mean",
+      "hist_weekday_hour_mean"
+    ],
+    "categorical_columns": [
+      "season",
+      "yr",
+      "mnth",
+      "hr",
+      "holiday",
+      "weekday",
+      "workingday",
+      "weathersit",
+      "is_weekend",
+      "is_sleep_hour",
+      "is_morning_rush",
+      "is_evening_rush",
+      "is_rush_hour",
+      "bad_weather",
+      "pleasant_weather",
+      "is_month_start",
+      "is_month_end"
+    ]
+  },
+  "metrics": {
+    "lgbm_raw": {
+      "mse": 4102.117705699034,
+      "rmse": 64.04777674282718,
+      "mae": 43.238868976170124,
+      "r2": 0.9128943366254901
+    },
+    "lgbm_log": {
+      "mse": 5042.658190957987,
+      "rmse": 71.01167644097686,
+      "mae": 48.484642351769416,
+      "r2": 0.8929226028097479
+    },
+    "xgb_raw": {
+      "mse": 3913.69287109375,
+      "rmse": 62.559514632817844,
+      "mae": 42.420047760009766,
+      "r2": 0.9168953895568848
+    },
+    "cat_raw": {
+      "mse": 4636.661503641029,
+      "rmse": 68.09303564712789,
+      "mae": 46.77040813900899,
+      "r2": 0.9015436647377041
+    },
+    "ensemble": {
+      "mse": 3901.8962776409808,
+      "rmse": 62.46516051080779,
+      "mae": 42.249148315793015,
+      "r2": 0.9171459016862777
+    }
+  },
+  "ensemble_weights": {
+    "lgbm_raw": 0.15000000000000002,
+    "lgbm_log": 0.0,
+    "xgb_raw": 0.8,
+    "cat_raw": 0.05
+  },
+  "ensemble_weight_search_mse": 3901.8964424090427,
+  "submission": "output\\submission_fresh_ensemble.csv"
+}
